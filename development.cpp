@@ -7,6 +7,7 @@
 #include <opencv2/videoio.hpp>
 #include <opencv2/core/mat.hpp>
 #include <arm_neon.h>
+#include <papi.h>
 
 using namespace std;
 using namespace cv;
@@ -23,7 +24,14 @@ struct args{
 };
 
 void* graySobel(void*);
+void handle_error(int);
 pthread_barrier_t barrierA, barrierB, barrierC;
+
+void handle_error (int retval)
+{
+    printf("PAPI error %d: %s\n", retval, PAPI_strerror(retval));
+    exit(1);
+}
 
 int main(int argc, char **argv){
     //ensure number of arguments are correct
@@ -32,6 +40,15 @@ int main(int argc, char **argv){
         return 0;
     }
 
+
+    // PAPI counter INIT
+    int retval, EventSet = PAPI_NULL;
+    long long start_cycles, end_cycles, start_usec, end_usec;
+
+    retval =  PAPI_library_init(PAPI_VER_CURRENT);   
+    if (retval != PAPI_VER_CURRENT)
+	handle_error(retval);
+			
     string videoPath = argv[1];
     VideoCapture cap(videoPath);
 
@@ -46,6 +63,20 @@ int main(int argc, char **argv){
     pthread_barrier_init(&barrierA, NULL, NUM_THREADS + 1);
     pthread_barrier_init(&barrierB, NULL, NUM_THREADS + 1);
     pthread_barrier_init(&barrierC, NULL, NUM_THREADS);
+
+
+
+    /* PAPI COUNTER START */
+    /* Gets the starting time in clock cycles */
+    start_cycles = PAPI_get_virt_cyc();
+			
+    /* Gets the starting time in microseconds */
+    start_usec = PAPI_get_real_usec();
+
+    /*Create an EventSet */
+    retval = PAPI_create_eventset(&EventSet);
+    if (retval != PAPI_OK)
+	handle_error(retval);
 
 
     while (cap.read(src)){
@@ -73,7 +104,7 @@ int main(int argc, char **argv){
         pthread_barrier_wait(&barrierB);
         pthread_barrier_wait(&barrierA);
         namedWindow("sImage", WINDOW_NORMAL);
-        imshow("sImage", gray);
+        imshow("sImage", dest);
         waitKey(1);
     }
     status = 0;
@@ -82,6 +113,21 @@ int main(int argc, char **argv){
     for (int i = 0; i < NUM_THREADS; i++){
         pthread_join(threads[i], NULL);
     }
+
+
+    /* Gets the ending time in clock cycles */
+    end_cycles = PAPI_get_virt_cyc();
+			
+    /* Gets the ending time in microseconds */
+    end_usec = PAPI_get_real_usec();
+
+    // Print Ending times
+    printf("Virtual clock cycles: %lld\n", end_cycles - start_cycles);
+    printf("Real clock time in microseconds: %lld\n", end_usec - start_usec);
+
+    /* Executes if all low-level PAPI
+    function calls returned PAPI_OK */
+    printf("\033[0;32m\n\nPASSED\n\033[0m");
 
     return 0;
 }
