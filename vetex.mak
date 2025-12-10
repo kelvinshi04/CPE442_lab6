@@ -5,3 +5,6 @@ LDFLAGS = -lopencv_imgproc -lopencv_imgcodecs -lopencv_core -lopencv_highgui -lo
 
 simt_gles: simt_gles.cpp
 	$(CC) $(CFLAGS) simt_gles.cpp -o simt_gles $(LDFLAGS)
+
+clean:
+	rm -f simt_gles

@@ -65,6 +65,8 @@ int main(int argc, char **argv){
     pthread_barrier_init(&barrierC, NULL, NUM_THREADS);
 
 
+    long long frameCount = 0;
+    long long start_us   = PAPI_get_real_usec();
 
     /* PAPI COUNTER START */
     /* Gets the starting time in clock cycles */
@@ -80,6 +82,10 @@ int main(int argc, char **argv){
 
 
     while (cap.read(src)){
+
+        frameCount++;
+
+
         //flip(src, src, -1);
         if (!Mat_init){
             dest.create(src.rows, src.cols, CV_8UC1);
@@ -125,9 +131,28 @@ int main(int argc, char **argv){
     printf("Virtual clock cycles: %lld\n", end_cycles - start_cycles);
     printf("Real clock time in microseconds: %lld\n", end_usec - start_usec);
 
+    /* Gets the ending time in microseconds */
+    long long end_us = PAPI_get_real_usec();
+
+    long long total_us = end_us - start_us;
+
+    if (frameCount > 0) {
+        double total_s  = total_us / 1e6;
+        double total_ms = total_us / 1000.0;
+        double fps      = frameCount / total_s;
+
+        cout << "Frames processed: " << frameCount << endl;
+        cout << "Average FPS: " << fps << endl;
+    } else {
+        cout << "No frames processed (check video path)." << endl;
+    }
+
+
     /* Executes if all low-level PAPI
     function calls returned PAPI_OK */
     printf("\033[0;32m\n\nPASSED\n\033[0m");
+
+
 
     return 0;
 }

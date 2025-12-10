@@ -1,5 +1,6 @@
 #include <iostream>
 #include <vector>
+
 #include <opencv2/opencv.hpp>
 
 #include <GLFW/glfw3.h>
@@ -10,14 +11,22 @@
 using namespace std;
 using namespace cv;
 
-// Vertex shader: full-screen quad
+// ===========================
+// GLSL SHADERS
+// ===========================
+
+// Vertex shader: full-screen quad with scaling
 const char* vsSrc = R"GLSL(
 attribute vec2 aPos;
 attribute vec2 aTexCoord;
 varying vec2 vTexCoord;
+
+uniform vec2 uScale; // scales quad to fit window while preserving aspect
+
 void main() {
     vTexCoord = aTexCoord;
-    gl_Position = vec4(aPos, 0.0, 1.0);
+    vec2 scaledPos = aPos * uScale;
+    gl_Position = vec4(scaledPos, 0.0, 1.0);
 }
 )GLSL";
 
@@ -26,6 +35,7 @@ void main() {
 // col.r = B, col.g = G, col.b = R
 const char* fsSrc = R"GLSL(
 precision mediump float;
+
 uniform sampler2D uImage;
 uniform vec2 uTexelSize; // 1/width, 1/height
 varying vec2 vTexCoord;
@@ -38,6 +48,7 @@ float gray(vec3 col) {
 void main() {
     vec2 t = uTexelSize;
 
+    // 3x3 neighborhood
     vec3 c11 = texture2D(uImage, vTexCoord + vec2(-t.x, -t.y)).rgb;
     vec3 c12 = texture2D(uImage, vTexCoord + vec2( 0.0, -t.y)).rgb;
     vec3 c13 = texture2D(uImage, vTexCoord + vec2( t.x, -t.y)).rgb;
@@ -60,6 +71,7 @@ void main() {
     float g32 = gray(c32);
     float g33 = gray(c33);
 
+    // Sobel X and Y
     float Gx = (-g11 + g13)
              + (-2.0 * g21 + 2.0 * g23)
              + (-g31 + g33);
@@ -67,20 +79,24 @@ void main() {
     float Gy = ( g11 + 2.0 * g12 + g13 )
              - ( g31 + 2.0 * g32 + g33 );
 
-    float mag = abs(Gx) + abs(Gy);  // 0..~8
-
-    // scale to 0..1 for display
-    mag = mag / 4.0;                // tweak this if too bright/dim
+    // Edge magnitude (L1)
+    float mag = abs(Gx) + abs(Gy);  // 0..roughly 8
+    mag = mag / 4.0;
     mag = clamp(mag, 0.0, 1.0);
 
     gl_FragColor = vec4(vec3(mag), 1.0);
 }
 )GLSL";
 
+// ===========================
+// GL UTILITIES
+// ===========================
+
 static GLuint compileShader(GLenum type, const char* src) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &src, nullptr);
     glCompileShader(shader);
+
     GLint status = 0;
     glGetShaderiv(shader, GL_COMPILE_STATUS, &status);
     if (!status) {
@@ -97,11 +113,10 @@ static GLuint compileShader(GLenum type, const char* src) {
 static GLuint createProgram(const char* vs, const char* fs) {
     GLuint vsObj = compileShader(GL_VERTEX_SHADER, vs);
     GLuint fsObj = compileShader(GL_FRAGMENT_SHADER, fs);
-    GLuint prog = glCreateProgram();
+    GLuint prog  = glCreateProgram();
+
     glAttachShader(prog, vsObj);
     glAttachShader(prog, fsObj);
-    glBindAttribLocation(prog, 0, "aPos");
-    glBindAttribLocation(prog, 1, "aTexCoord");
     glLinkProgram(prog);
 
     GLint status = 0;
@@ -119,6 +134,10 @@ static GLuint createProgram(const char* vs, const char* fs) {
     glDeleteShader(fsObj);
     return prog;
 }
+
+// ===========================
+// MAIN
+// ===========================
 
 int main(int argc, char** argv) {
     if (argc != 2) {
@@ -139,6 +158,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ---- Determine source size (original resolution) ----
     int srcW = (int)cap.get(CAP_PROP_FRAME_WIDTH);
     int srcH = (int)cap.get(CAP_PROP_FRAME_HEIGHT);
 
@@ -153,40 +173,28 @@ int main(int argc, char** argv) {
         cap.set(CAP_PROP_POS_FRAMES, 0);
     }
 
-    // ---- Choose target (processed) resolution ----
-    // We scale the video down to fit within maxW x maxH, preserving aspect ratio.
-    int maxW = 640;
-    int maxH = 480;
-    float scaleW = (float)maxW / (float)srcW;
-    float scaleH = (float)maxH / (float)srcH;
-    float scale  = std::min(scaleW, scaleH);
+    // ---- Use original video resolution as texture size (no resize) ----
+    int tgtW = srcW;
+    int tgtH = srcH;
 
-    if (scale > 1.0f) {
-        // Don't upscale small videos; process at native res
-        scale = 1.0f;
-    }
-
-    int tgtW = (int)(srcW * scale);
-    int tgtH = (int)(srcH * scale);
-
-    if (tgtW <= 0) tgtW = srcW;
-    if (tgtH <= 0) tgtH = srcH;
-
-    cout << "Source size: " << srcW << "x" << srcH
-         << "  ->  Target (processed/display) size: "
+    cout << "Processing at original resolution: "
          << tgtW << "x" << tgtH << endl;
 
     // ---- Init GLFW/GLES ----
     if (!glfwInit()) {
-        cerr << "Failed to init GLFW." << endl;
+        cerr << "Failed to init GLFW" << endl;
         return 1;
     }
 
+    // Request OpenGL ES 2.0 context
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    // Window is resizable by default (like OpenCV WINDOW_NORMAL)
 
-    GLFWwindow* window = glfwCreateWindow(tgtW, tgtH, "GLES Sobel", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(
+        tgtW, tgtH, "GLES Sobel (Scalable Window)", nullptr, nullptr
+    );
     if (!window) {
         cerr << "Failed to create window." << endl;
         glfwTerminate();
@@ -194,21 +202,27 @@ int main(int argc, char** argv) {
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // vsync
+    // Disable vsync for max FPS (you can set 1 if you prefer no tearing)
+    glfwSwapInterval(0);
 
+    // Create shader program
     GLuint program = createProgram(vsSrc, fsSrc);
     glUseProgram(program);
 
-    GLint locTex   = glGetUniformLocation(program, "uImage");
-    GLint locTexel = glGetUniformLocation(program, "uTexelSize");
+    // Look up attribute and uniform locations
+    GLint locPos     = glGetAttribLocation(program, "aPos");
+    GLint locTexCoord= glGetAttribLocation(program, "aTexCoord");
+    GLint locTex     = glGetUniformLocation(program, "uImage");
+    GLint locTexel   = glGetUniformLocation(program, "uTexelSize");
+    GLint locScale   = glGetUniformLocation(program, "uScale");
 
-    // Fullscreen quad
+    // ---- Full-screen quad geometry (two triangles as a strip) ----
     float quadVerts[] = {
-        // pos      // tex
-        -1.0f, -1.0f,  0.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 1.0f,
-        -1.0f,  1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 0.0f
+        //  x,    y,   u,   v
+        -1.0f, -1.0f, 0.0f, 1.0f,
+         1.0f, -1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 0.0f
     };
 
     GLuint vbo;
@@ -216,17 +230,33 @@ int main(int argc, char** argv) {
     glBindBuffer(GL_ARRAY_BUFFER, vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
 
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(locPos);
+    glVertexAttribPointer(
+        locPos,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        4 * sizeof(float),
+        (void*)0
+    );
 
-    // Texture at target resolution
+    glEnableVertexAttribArray(locTexCoord);
+    glVertexAttribPointer(
+        locTexCoord,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        4 * sizeof(float),
+        (void*)(2 * sizeof(float))
+    );
+
+    // ---- Texture at original resolution ----
     GLuint tex;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
@@ -241,35 +271,33 @@ int main(int argc, char** argv) {
                  nullptr);
 
     glUseProgram(program);
-    glUniform1i(locTex, 0);
+    glUniform1i(locTex, 0);                      // texture unit 0
     glUniform2f(locTexel, 1.0f / tgtW, 1.0f / tgtH);
 
-    long long frameCount = 0;
-    long long start_us   = PAPI_get_real_usec();
+    // Clear color for letterboxing area
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
-    /* PAPI COUNTER START */
-    /* Gets the starting time in clock cycles */
+    long long frameCount = 0;
+
+    long long start_us     = PAPI_get_real_usec();
     long long start_cycles = PAPI_get_virt_cyc();
-			
-    /* Gets the starting time in microseconds */
-    long long start_usec = PAPI_get_real_usec();
 
     Mat frameBGR;
-    Mat frameSmall;
 
+    // ===========================
+    // MAIN LOOP
+    // ===========================
     while (!glfwWindowShouldClose(window)) {
+        // Read next frame
         if (!cap.read(frameBGR) || frameBGR.empty()) {
             break; // end of video
         }
-
         frameCount++;
 
-        // Resize to target resolution
-        resize(frameBGR, frameSmall, Size(tgtW, tgtH), 0, 0, INTER_LINEAR);
+        if (!frameBGR.isContinuous())
+            frameBGR = frameBGR.clone();
 
-        if (!frameSmall.isContinuous())
-            frameSmall = frameSmall.clone();
-
+        // Upload original-resolution frame to texture
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex);
         glTexSubImage2D(GL_TEXTURE_2D,
@@ -280,13 +308,37 @@ int main(int argc, char** argv) {
                         tgtH,
                         GL_RGB,
                         GL_UNSIGNED_BYTE,
-                        frameSmall.data);
+                        frameBGR.data);
 
-        glViewport(0, 0, tgtW, tgtH);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        // Get current window framebuffer size
+        int fbW, fbH;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+
+        // Set viewport to full window
+        glViewport(0, 0, fbW, fbH);
+
+        // Compute scale to fit image in window, preserving aspect ratio
+        float imageAspect   = static_cast<float>(tgtW) / static_cast<float>(tgtH);
+        float windowAspect  = static_cast<float>(fbW) / static_cast<float>(fbH);
+        float scaleX = 1.0f;
+        float scaleY = 1.0f;
+
+        if (windowAspect > imageAspect) {
+            // Window is wider than image: fit height, letterbox left/right
+            scaleX = imageAspect / windowAspect;
+            scaleY = 1.0f;
+        } else {
+            // Window is taller/narrower: fit width, letterbox top/bottom
+            scaleX = 1.0f;
+            scaleY = windowAspect / imageAspect;
+        }
+
+        // Clear background (for letterboxing areas)
         glClear(GL_COLOR_BUFFER_BIT);
 
+        // Draw Sobel-processed quad with scaling
         glUseProgram(program);
+        glUniform2f(locScale, scaleX, scaleY);
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
@@ -294,34 +346,26 @@ int main(int argc, char** argv) {
         glfwPollEvents();
     }
 
-    long long end_us   = PAPI_get_real_usec();
-    long long total_us = end_us - start_us;
-
-    /* Gets the ending time in clock cycles */
-    long long end_cycles = PAPI_get_virt_cyc();
-			
-    /* Gets the ending time in microseconds */
-    long long end_usec = PAPI_get_real_usec();
-
-    // Print Ending times
-    printf("Virtual clock cycles: %lld\n", end_cycles - start_cycles);
-    printf("Real clock time in microseconds: %lld\n", end_usec - start_usec);
-
-    /* Executes if all low-level PAPI
-    function calls returned PAPI_OK */
-    printf("\033[0;32m\n\nPASSED\n\033[0m");
+    long long end_us       = PAPI_get_real_usec();
+    long long total_us     = end_us - start_us;
+    long long end_cycles   = PAPI_get_virt_cyc();
+    long long total_cycles = end_cycles - start_cycles;
 
     if (frameCount > 0) {
-        double total_s  = total_us / 1e6;
-        double total_ms = total_us / 1000.0;
-        double fps      = frameCount / total_s;
+        double total_s = total_us / 1e6;
+        double fps     = frameCount / total_s;
 
-        cout << "Frames processed: " << frameCount << endl;
+        cout << "Virtual clock cycles: " << total_cycles << endl;
+        cout << "Real clock time in microseconds: " << total_us << endl;
+        cout << "\033[0;32m\nPASSED\n\033[0m";
+
+        cout << "\nFrames processed: " << frameCount << endl;
         cout << "Average FPS: " << fps << endl;
     } else {
         cout << "No frames processed (check video path)." << endl;
     }
 
+    // Cleanup
     glDeleteTextures(1, &tex);
     glDeleteBuffers(1, &vbo);
     glDeleteProgram(program);
