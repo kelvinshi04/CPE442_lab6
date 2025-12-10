@@ -1,14 +1,21 @@
-// development_simt_int.cpp
-// SIMT version: grayscale computed with your exact integer formula, then Sobel.
-
 #include <iostream>
 #include <vector>
 #include <cstring>
 #include <opencv2/opencv.hpp>
 #include <CL/cl.h>
+#include <papi.h>
 
 using namespace std;
 using namespace cv;
+
+
+void handle_error(int);
+void handle_error (int retval)
+{
+    printf("PAPI error %d: %s\n", retval, PAPI_strerror(retval));
+    exit(1);
+}
+
 
 // OpenCL kernel: manual grayscale (integer formula) + Sobel
 const char* graySobelKernelSrcInt = R"CLC(
@@ -106,6 +113,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+     // PAPI counter INIT
+    int retval, EventSet = PAPI_NULL;
+    long long start_cycles, end_cycles, start_usec, end_usec;
+
+    retval =  PAPI_library_init(PAPI_VER_CURRENT);   
+    if (retval != PAPI_VER_CURRENT)
+	handle_error(retval);
+
     string videoPath = argv[1];
     VideoCapture cap(videoPath);
     if (!cap.isOpened()) {
@@ -163,6 +178,29 @@ int main(int argc, char** argv) {
 
     Mat src, dest;
     bool initialized = false;
+
+
+
+
+
+
+
+    /* PAPI COUNTER START */
+    /* Gets the starting time in clock cycles */
+    start_cycles = PAPI_get_virt_cyc();
+			
+    /* Gets the starting time in microseconds */
+    start_usec = PAPI_get_real_usec();
+
+    /*Create an EventSet */
+    retval = PAPI_create_eventset(&EventSet);
+    if (retval != PAPI_OK)
+	handle_error(retval);
+
+
+
+
+
 
     while (cap.read(src)) {
         if (src.empty()) break;
@@ -235,6 +273,26 @@ int main(int argc, char** argv) {
         imshow("sImage", dest);
         if (waitKey(1) == 27) break; // ESC
     }
+
+
+
+
+    /* Gets the ending time in clock cycles */
+    end_cycles = PAPI_get_virt_cyc();
+			
+    /* Gets the ending time in microseconds */
+    end_usec = PAPI_get_real_usec();
+
+    // Print Ending times
+    printf("Virtual clock cycles: %lld\n", end_cycles - start_cycles);
+    printf("Real clock time in microseconds: %lld\n", end_usec - start_usec);
+
+    /* Executes if all low-level PAPI
+    function calls returned PAPI_OK */
+    printf("\033[0;32m\n\nPASSED\n\033[0m");
+
+
+
 
     clReleaseKernel(kernel);
     clReleaseProgram(program);
